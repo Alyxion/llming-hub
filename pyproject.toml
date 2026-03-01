@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "llming-hub"
+version = "0.1.0"
+description = "Generic, reusable hub landing page for NiceGUI applications"
+authors = ["Michael Ikemann <michael.ikemann@gmail.com>"]
+license = "BUSL-1.1"
+packages = [{include = "llming_hub"}]
+
+[tool.poetry.dependencies]
+python = "~3.12"
+fastapi = "*"
+starlette = "*"
+nicegui = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
