@@ -300,7 +300,7 @@ Object.assign(HubApp.prototype, {
   // ── Theme ───────────────────────────────────────────────
 
   _applyTheme(root) {
-    const stored = localStorage.getItem('chat-theme');
+    const stored = localStorage.getItem('chat-color-mode');
     // Default to dark if no preference set
     const isDark = !stored || stored === 'dark' || stored === 'auto';
     root.classList.toggle('cv2-dark', isDark);
@@ -325,7 +325,7 @@ Object.assign(HubApp.prototype, {
     const root = document.getElementById('hub-app');
     if (!root) return;
     const isDark = root.classList.toggle('cv2-dark');
-    localStorage.setItem('chat-theme', isDark ? 'dark' : 'light');
+    localStorage.setItem('chat-color-mode', isDark ? 'dark' : 'light');
 
     const branding = this.config.branding || {};
     const bgEl = root.querySelector('.hub-bg');

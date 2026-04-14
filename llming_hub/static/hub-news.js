@@ -51,6 +51,7 @@ class NewsWidget extends HubWidget {
       const _tabLabel = (ch) => {
         if (ch === 'All') return this.i18n.news_tab_all || ch;
         if (ch === 'Global') return this.i18n.news_tab_global || ch;
+        if (ch === 'Local') return this.i18n.news_tab_local || ch;
         return ch;
       };
       this.tabsEl.innerHTML = this.channels.map(ch =>

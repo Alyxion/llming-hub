@@ -119,6 +119,10 @@ class ResourceCache:
                     self._store.pop(evict_key, None)
                     self._locks.pop(evict_key, None)
 
+                # Periodically prune orphaned locks (every ~100 cache writes)
+                if len(self._locks) > len(self._store) + 100:
+                    self.cleanup_orphaned_locks()
+
                 self._store[key] = _CacheEntry(
                     data=data,
                     media_type=media_type,
@@ -138,6 +142,13 @@ class ResourceCache:
             self._store.pop(k, None)
             self._locks.pop(k, None)
         return len(keys)
+
+    def cleanup_orphaned_locks(self) -> int:
+        """Remove locks that have no corresponding cache entry."""
+        orphaned = [k for k in self._locks if k not in self._store]
+        for k in orphaned:
+            self._locks.pop(k, None)
+        return len(orphaned)
 
 
 # Process-global singleton
@@ -162,6 +173,12 @@ def build_hub_data_router(
 
     @router.get(prefix + "/{plugin_id}/{resource_path:path}")
     async def hub_data_endpoint(plugin_id: str, resource_path: str, request: Request):
+        # 0. Path traversal guard
+        from pathlib import PurePosixPath
+        resolved = PurePosixPath(resource_path)
+        if resolved.is_absolute() or ".." in resolved.parts:
+            return Response(status_code=400, content="Invalid resource path")
+
         # 1. Auth — require valid NiceGUI session cookie
         if not request.session.get("id"):
             return Response(status_code=401, content="Not authenticated")

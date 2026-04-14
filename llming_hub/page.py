@@ -1,48 +1,171 @@
-"""Hub landing page — NiceGUI page factory.
+"""Hub landing page — pure FastAPI/Starlette route.
 
-Creates the @ui.page route that injects JS/CSS and bootstraps the hub.
+Generates a static HTML page that bootstraps the hub SPA.
+No NiceGUI dependency.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from nicegui import ui, app
+from starlette.requests import Request
+from starlette.responses import HTMLResponse
 
 if TYPE_CHECKING:
     from llming_hub.config import HubConfig
 
 logger = logging.getLogger(__name__)
 
+_STATIC_DIR = Path(__file__).parent / "static"
+
+# ── Content-hash cache busting ───────────────────────────────────
+_file_hashes: dict[str, str] = {}
+
+
+def _compute_file_hashes(static_dir: Path) -> dict[str, str]:
+    """Compute MD5 content hashes for static files."""
+    hashes = {}
+    for fpath in static_dir.iterdir():
+        if fpath.suffix in ('.js', '.css'):
+            hashes[fpath.name] = hashlib.md5(fpath.read_bytes()).hexdigest()[:10]
+    return hashes
+
+
+def _hashed_url(prefix: str, filename: str) -> str:
+    """Return URL with content hash for cache busting."""
+    global _file_hashes
+    if not _file_hashes:
+        _file_hashes = _compute_file_hashes(_STATIC_DIR)
+    h = _file_hashes.get(filename, "dev")
+    return f"{prefix}/{filename}?v={h}"
+
+
+def invalidate_hub_hashes() -> None:
+    """Clear hash cache (called by dev file watcher)."""
+    global _file_hashes
+    _file_hashes = {}
+
+
+# ── HTML builder ─────────────────────────────────────────────────
+
+def _build_hub_html(config_json: str, css_urls: list[str], js_scripts: list[str],
+                    extra_head: str = "", title: str = "Hub") -> str:
+    """Build the complete HTML page for the hub SPA."""
+    css_tags = "\n".join(f'<link rel="stylesheet" href="{url}">' for url in css_urls)
+    # Phase 1: features.js first, Phase 2: widgets in parallel, Phase 3: core last
+    js_phase1 = js_scripts[0] if js_scripts else ""
+    js_phase2 = js_scripts[1:-1] if len(js_scripts) > 2 else []
+    js_phase3 = js_scripts[-1] if len(js_scripts) > 1 else ""
+
+    phase2_json = json.dumps(js_phase2)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{title}</title>
+{css_tags}
+{extra_head}
+</head>
+<body>
+<div id="hub-app" style="position:fixed;inset:0;"></div>
+<script>window.__HUB_CONFIG__ = {config_json};</script>
+<script>
+// Preload avatar
+if (window.__HUB_CONFIG__.userAvatar) {{
+  const pl = document.createElement('link');
+  pl.rel = 'preload'; pl.as = 'image';
+  pl.href = window.__HUB_CONFIG__.userAvatar;
+  document.head.appendChild(pl);
+}}
+// Load scripts in phases
+(async () => {{
+  const loadScript = src => new Promise((resolve, reject) => {{
+    const s = document.createElement('script');
+    s.src = src; s.onload = resolve;
+    s.onerror = () => {{ s.remove(); setTimeout(() => {{
+      const r = document.createElement('script');
+      r.src = src; r.onload = resolve; r.onerror = reject;
+      document.head.appendChild(r);
+    }}, 500); }};
+    document.head.appendChild(s);
+  }});
+  await loadScript({json.dumps(js_phase1)});
+  await Promise.all({phase2_json}.map(loadScript));
+  if ({json.dumps(js_phase3)}) await loadScript({json.dumps(js_phase3)});
+}})();
+</script>
+</body>
+</html>"""
+
+
+# ── Route factory ────────────────────────────────────────────────
 
 def create_hub_page(config: "HubConfig", route: str = "/"):
-    """Register a NiceGUI page route for the hub landing page."""
+    """Create a FastAPI route handler for the hub page.
+
+    Returns the async route function (to be registered by hub.mount).
+    """
     from llming_hub.registry import HubSessionRegistry
 
-    @ui.page(route)
-    async def hub_route():
+    async def hub_route(request: Request) -> HTMLResponse:
         try:
-            await _hub_route_impl(config)
+            return await _hub_route_impl(config, request)
         except Exception as e:
-            logger.exception(f"[HUB] hub_route crashed: {e}")
-            ui.label(f"Error: {e}").classes("text-red-500")
+            logger.exception("[HUB] hub_route crashed: %s", e)
+            import html
+            return HTMLResponse(
+                f"<html><body><h1>Error</h1><p>{html.escape(str(e))}</p></body></html>",
+                status_code=500,
+            )
+
+    return hub_route
 
 
-async def _hub_route_impl(config: "HubConfig"):
+async def _hub_route_impl(config: "HubConfig", request: Request):
     from llming_hub.registry import HubSessionRegistry
 
-    # Call the consuming app's session_setup callback
-    if not config.session_setup:
-        ui.label("Hub not configured: no session_setup callback").classes("text-red-500")
-        return
+    # ── OAuth callback interception ─────────────────────────
+    # If this is a redirect back from the OAuth provider (?code=...),
+    # delegate to the OAuth callback handler before doing anything else.
+    if config.oauth_callback_handler and request.query_params.get("code"):
+        return await config.oauth_callback_handler(request)
 
-    session_info = await config.session_setup()
+    if not config.session_setup:
+        return HTMLResponse("<h1>Hub not configured</h1>", status_code=500)
+
+    # Call the consuming app's session_setup callback.
+    # Pass the request so the callback can check auth cookies.
+    import inspect
+    sig = inspect.signature(config.session_setup)
+    if len(sig.parameters) > 0:
+        session_info = await config.session_setup(request)
+    else:
+        session_info = await config.session_setup()
+
     if session_info is None:
-        return  # Auth failed or redirect happened
+        # Auth failed — clear stale cookies and initiate OAuth.
+        # The session_setup callback returns None when the identity cookie
+        # is missing, invalid, or expired (e.g. old secret, old format).
+        from starlette.responses import RedirectResponse
+        if config.oauth_start_handler:
+            return await config.oauth_start_handler(request)
+        # Fallback: clear cookies and redirect to self — the page will
+        # show without user-specific data (no redirect loop since cookies
+        # are cleared).
+        response = RedirectResponse("/", status_code=302)
+        response.delete_cookie("llming_identity", path="/")
+        response.delete_cookie("llming_auth", path="/")
+        response.delete_cookie("llming_session", path="/")
+        return response
 
     user = session_info.user
     i18n = session_info.i18n
@@ -50,7 +173,7 @@ async def _hub_route_impl(config: "HubConfig"):
     # Register session
     session_id = str(uuid4())
     registry = HubSessionRegistry.get()
-    registry.register(
+    registry.register_user(
         session_id=session_id,
         user_id=user.user_id,
         user_name=user.given_name or user.user_name,
@@ -65,18 +188,13 @@ async def _hub_route_impl(config: "HubConfig"):
             "apps": session_info.apps,
             "version": session_info.version,
             "copyright": session_info.copyright,
-            "is_admin": session_info.is_admin,
+            "permissions": session_info.permissions,
             "dev_overrides": session_info.dev_overrides,
             "dev_overrides_label": session_info.dev_overrides_label,
             "i18n": i18n,
             **session_info.config_extra,
         },
     )
-
-    # Cleanup on disconnect
-    def _cleanup():
-        registry.remove(session_id)
-    ui.context.client.on_disconnect(_cleanup)
 
     # Build config payload for the client
     config_payload = {
@@ -86,7 +204,7 @@ async def _hub_route_impl(config: "HubConfig"):
         "fullName": user.user_name,
         "userEmail": user.user_email,
         "userAvatar": user.user_avatar,
-        "isAdmin": session_info.is_admin,
+        "permissions": session_info.permissions,
         "greeting": session_info.greeting,
         "locale": user.locale,
         "bannerHtml": session_info.banner_html,
@@ -97,9 +215,7 @@ async def _hub_route_impl(config: "HubConfig"):
         "devOverrides": session_info.dev_overrides,
         "devOverridesLabel": session_info.dev_overrides_label,
         "i18n": i18n,
-        # Extra config from consuming app (e.g. weather_city_display)
         **session_info.config_extra,
-        # Branding from HubConfig
         "branding": {
             "logoUrl": config.logo_url,
             "appTitle": config.app_title,
@@ -114,72 +230,22 @@ async def _hub_route_impl(config: "HubConfig"):
     }
     config_json = json.dumps(config_payload, ensure_ascii=False).replace("</", r"<\/")
 
-    # Cache-bust suffix
-    _cb = str(int(time.time()))
     sp = config.static_prefix
-
-    _css_urls = [
+    css_urls = [
         *session_info.extra_css_urls,
-        f"{sp}/hub-core.css?v={_cb}",
+        _hashed_url(sp, "hub-core.css"),
     ]
-    _js_scripts = [
-        f"{sp}/hub-features.js?v={_cb}",     # must be first
-        f"{sp}/hub-ws.js?v={_cb}",
-        f"{sp}/hub-apps.js?v={_cb}",
-        f"{sp}/hub-weather.js?v={_cb}",
-        f"{sp}/hub-mail.js?v={_cb}",
-        f"{sp}/hub-calendar.js?v={_cb}",
-        f"{sp}/hub-news.js?v={_cb}",
-        f"{sp}/hub-stats.js?v={_cb}",
-        f"{sp}/hub-app-core.js?v={_cb}",     # must be last
+    js_scripts = [
+        _hashed_url(sp, "hub-features.js"),   # phase 1 (first)
+        _hashed_url(sp, "hub-ws.js"),          # phase 2
+        _hashed_url(sp, "hub-apps.js"),
+        _hashed_url(sp, "hub-weather.js"),
+        _hashed_url(sp, "hub-mail.js"),
+        _hashed_url(sp, "hub-calendar.js"),
+        _hashed_url(sp, "hub-news.js"),
+        _hashed_url(sp, "hub-stats.js"),
+        _hashed_url(sp, "hub-app-core.js"),    # phase 3 (last)
     ]
 
-    ui.run_javascript(f"""
-        // -- CSS --
-        {_css_urls!r}.forEach(href => {{
-            if (!document.querySelector(`link[href="${{href}}"]`)) {{
-                const link = document.createElement('link');
-                link.rel = 'stylesheet';
-                link.href = href;
-                document.head.appendChild(link);
-            }}
-        }});
-        // -- hide NiceGUI content, mount hub --
-        (function() {{
-            const s = document.createElement('style');
-            s.textContent = `
-                .nicegui-content {{ padding: 0 !important; display: none !important; }}
-                .q-page-container {{ height: 100vh; }}
-                .q-page {{ height: 100%; }}
-            `;
-            document.head.appendChild(s);
-        }})();
-        if (!document.getElementById('hub-app')) {{
-            const div = document.createElement('div');
-            div.id = 'hub-app';
-            div.style.cssText = 'position:fixed;inset:0;z-index:9999;';
-            document.body.appendChild(div);
-        }}
-        // -- config + scripts --
-        window.__HUB_CONFIG__ = {config_json};
-        // -- preload avatar --
-        if (window.__HUB_CONFIG__.userAvatar) {{
-            const preload = document.createElement('link');
-            preload.rel = 'preload';
-            preload.as = 'image';
-            preload.href = window.__HUB_CONFIG__.userAvatar;
-            document.head.appendChild(preload);
-        }}
-        (async () => {{
-            const loadScript = (src) => new Promise((resolve, reject) => {{
-                const s = document.createElement('script');
-                s.src = src;
-                s.onload = resolve;
-                s.onerror = reject;
-                document.head.appendChild(s);
-            }});
-            await loadScript({_js_scripts[0]!r});
-            await Promise.all({_js_scripts[1:-1]!r}.map(loadScript));
-            await loadScript({_js_scripts[-1]!r});
-        }})();
-    """)
+    html = _build_hub_html(config_json, css_urls, js_scripts, title=config.app_title or "Hub")
+    return HTMLResponse(html)

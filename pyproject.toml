@@ -7,10 +7,10 @@ license = "BUSL-1.1"
 packages = [{include = "llming_hub"}]
 
 [tool.poetry.dependencies]
-python = "~3.12"
+python = ">=3.14"
 fastapi = "*"
 starlette = "*"
-nicegui = "*"
+llming-com = {path = "../llming-com", develop = true}
 
 [build-system]
 requires = ["poetry-core"]

@@ -1,4 +1,7 @@
-"""Calendar widget provider — wraps CalendarAdapter with avatar resolution."""
+"""Calendar widget provider — wraps CalendarAdapter with avatar resolution.
+
+Events are sent as UTC timestamps; the browser widget converts to local time.
+"""
 
 from __future__ import annotations
 
@@ -24,15 +27,6 @@ def _get_initials(name: str) -> str:
     return name[:2].upper() if name else "?"
 
 
-_WEEKDAY_SHORT: dict[str, list[str]] = {
-    "en": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-    "de": ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"],
-    "fr": ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
-    "it": ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"],
-    "hi": ["\u0938\u094b\u092e", "\u092e\u0902\u0917\u0932", "\u092c\u0941\u0927", "\u0917\u0941\u0930\u0941", "\u0936\u0941\u0915\u094d\u0930", "\u0936\u0928\u093f", "\u0930\u0935\u093f"],
-}
-
-
 class CalendarWidgetProvider(BaseProvider):
     widget_id = "calendar"
     interval = 120.0
@@ -54,12 +48,11 @@ class CalendarWidgetProvider(BaseProvider):
 
     async def fetch_data(self, params=None) -> Optional[dict[str, Any]]:
         try:
-            now = datetime.now()
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            now = datetime.utcnow()
 
             raw_events = await self.adapter.get_events(
-                start=today_start,
-                end=today_start + timedelta(days=60),
+                start=now.replace(hour=0, minute=0, second=0, microsecond=0),
+                end=now + timedelta(days=60),
                 limit=20,
             )
 
@@ -67,9 +60,9 @@ class CalendarWidgetProvider(BaseProvider):
             has_unresolved = False
             idx = 0
             for ev in raw_events:
-                if not ev.is_all_day and ev.end_time.replace(tzinfo=None) < now:
+                if not ev.is_all_day and ev.end_time < now:
                     continue
-                formatted = await self._format_event(ev, now)
+                formatted = await self._format_event(ev)
                 formatted["_idx"] = idx
                 if ev.attendees and not formatted.get("attendees"):
                     has_unresolved = True
@@ -98,23 +91,15 @@ class CalendarWidgetProvider(BaseProvider):
             logger.warning(f"[CALENDAR_PROVIDER] Error: {e}")
             return {"error": str(e)}
 
-    async def _format_event(self, ev: CalEvent, now: datetime) -> dict[str, Any]:
-        today = now.date()
-        ev_date = ev.start_time.date()
-
-        if ev_date == today:
-            date_label = ""
-        elif ev_date == today + timedelta(days=1):
-            date_label = self._tomorrow_label
-        else:
-            weekdays = _WEEKDAY_SHORT.get(self._locale, _WEEKDAY_SHORT["en"])
-            wd = weekdays[ev.start_time.weekday()]
-            date_label = f"{wd}, {ev.start_time.strftime('%d.%m.')}"
-
+    async def _format_event(self, ev: CalEvent) -> dict[str, Any]:
+        # Send UTC ISO timestamps — browser converts to local time
         if ev.is_all_day:
-            time_str = ""
+            # All-day: send date string to avoid timezone-shift issues
+            start_utc = ev.start_time.strftime("%Y-%m-%d")
+            end_utc = ev.end_time.strftime("%Y-%m-%d")
         else:
-            time_str = f"{ev.start_time.strftime('%H:%M')}\u2013{ev.end_time.strftime('%H:%M')}"
+            start_utc = ev.start_time.isoformat() + "Z"
+            end_utc = ev.end_time.isoformat() + "Z"
 
         # Resolve attendee avatars via directory adapter
         attendees = []
@@ -141,8 +126,8 @@ class CalendarWidgetProvider(BaseProvider):
 
         return {
             "subject": ev.subject or "",
-            "date_label": date_label,
-            "time_str": time_str,
+            "start_utc": start_utc,
+            "end_utc": end_utc,
             "location": ev.location or "",
             "is_all_day": ev.is_all_day,
             "is_private": is_private,

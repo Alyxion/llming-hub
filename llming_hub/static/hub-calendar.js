@@ -1,5 +1,8 @@
 /**
  * hub-calendar.js — Calendar widget
+ *
+ * Events arrive with UTC timestamps (start_utc / end_utc).
+ * All timezone conversion happens here in the browser.
  */
 
 /* ── show_as color map ─────────────────────────────── */
@@ -16,6 +19,56 @@ function _calDotStyle(showAs) {
   return `background:${_calShowAsColor[showAs] || _calShowAsColor.busy}`;
 }
 
+/* ── UTC → local time helpers ──────────────────────── */
+
+function _calParseLocal(ev) {
+  // All-day events: start_utc is "YYYY-MM-DD" — treat as local date (no tz shift)
+  if (ev.is_all_day) {
+    const p = ev.start_utc.split('-');
+    return new Date(+p[0], +p[1] - 1, +p[2]);
+  }
+  // Timed events: start_utc is ISO with Z suffix → browser converts to local
+  return new Date(ev.start_utc);
+}
+
+function _calParseLocalEnd(ev) {
+  if (ev.is_all_day) {
+    const p = ev.end_utc.split('-');
+    return new Date(+p[0], +p[1] - 1, +p[2]);
+  }
+  return new Date(ev.end_utc);
+}
+
+function _calPad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+function _calTimeStr(ev) {
+  if (ev.is_all_day) return '';
+  const s = _calParseLocal(ev);
+  const e = _calParseLocalEnd(ev);
+  return _calPad2(s.getHours()) + ':' + _calPad2(s.getMinutes())
+    + '\u2013'
+    + _calPad2(e.getHours()) + ':' + _calPad2(e.getMinutes());
+}
+
+function _calDateLabel(ev, i18n) {
+  const evDate = _calParseLocal(ev);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
+  const evDay = new Date(evDate.getFullYear(), evDate.getMonth(), evDate.getDate());
+
+  if (evDay.getTime() === today.getTime()) return '';
+  if (evDay.getTime() === tomorrow.getTime()) return i18n.calendar_tomorrow || 'Tomorrow';
+
+  // "Wed, 05.03."
+  const wd = evDate.toLocaleDateString(undefined, { weekday: 'short' });
+  const dd = _calPad2(evDate.getDate());
+  const mm = _calPad2(evDate.getMonth() + 1);
+  return wd + ', ' + dd + '.' + mm + '.';
+}
+
+/* ── Event HTML ────────────────────────────────────── */
+
 function _calEventHtml(ev, i18n) {
   const allDayLabel = i18n.calendar_all_day || 'All day';
   const dot = `<span class="hub-cal-dot" style="${_calDotStyle(ev.show_as)}"></span>`;
@@ -25,7 +78,7 @@ function _calEventHtml(ev, i18n) {
   if (ev.is_all_day) {
     timeStr = `<span class="hub-cal-allday">${_esc(allDayLabel)}</span>`;
   } else {
-    timeStr = `<span class="hub-cal-time">${_esc(ev.time_str)}</span>`;
+    timeStr = `<span class="hub-cal-time">${_esc(_calTimeStr(ev))}</span>`;
   }
 
   // Subject
@@ -98,7 +151,14 @@ class CalendarWidget extends HubWidget {
 
     const events = data.events || [];
 
-    if (events.length === 0) {
+    // Filter out past timed events in local time
+    const now = new Date();
+    const filtered = events.filter(ev => {
+      if (ev.is_all_day) return true;
+      return _calParseLocalEnd(ev) > now;
+    });
+
+    if (filtered.length === 0) {
       this.bodyEl.innerHTML = `<div class="hub-cal-empty">${_esc(this.i18n.calendar_no_events || 'No upcoming events')}</div>`;
       return;
     }
@@ -106,8 +166,10 @@ class CalendarWidget extends HubWidget {
     let html = '';
     let lastDateLabel = null;
 
-    for (const ev of events) {
-      const dl = ev.date_label || '';
+    for (let i = 0; i < filtered.length; i++) {
+      const ev = filtered[i];
+      ev._idx = i;  // local index for popup lookup
+      const dl = _calDateLabel(ev, this.i18n);
       if (dl !== lastDateLabel) {
         if (dl) {
           html += `<div class="hub-cal-day-label">${_esc(dl)}</div>`;
@@ -119,7 +181,7 @@ class CalendarWidget extends HubWidget {
 
     this.bodyEl.innerHTML = html;
 
-    this.events = events;
+    this.events = filtered;
     _hubBindHover(this.bodyEl, '.hub-cal-event', (el) => this._buildPopup(el));
   }
 
@@ -133,8 +195,8 @@ class CalendarWidget extends HubWidget {
     const subject = _esc((ev.subject && ev.subject !== 'No Subject') ? ev.subject : noSubj);
     const time = ev.is_all_day
       ? _esc(this.i18n.calendar_all_day || 'All day')
-      : _esc(ev.time_str || '');
-    const dateLabel = _esc(ev.date_label || '');
+      : _esc(_calTimeStr(ev));
+    const dateLabel = _esc(_calDateLabel(ev, this.i18n));
     const location = _esc(ev.location || '');
     const showAs = _esc(ev.show_as || 'busy');
 

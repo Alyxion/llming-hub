@@ -28,7 +28,8 @@ HubFeatures.register('apps', {
     // Admin + settings links
     const adminUrl = branding.adminUrl || '/admin';
     const settingsUrl = branding.settingsUrl || '/settings';
-    const adminLink = cfg.isAdmin
+    const _perms = new Set(cfg.permissions || []);
+    const adminLink = _perms.has('hub_admin')
       ? `<a href="${_esc(adminUrl)}" class="hub-header-icon" title="${_esc(i18n.admin_tooltip || '')}">
            <span class="material-icons">admin_panel_settings</span>
          </a>`

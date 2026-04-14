@@ -1,4 +1,7 @@
-"""LandingHub — main orchestrator for the hub landing page."""
+"""LandingHub — main orchestrator for the hub landing page.
+
+No NiceGUI dependency — uses FastAPI/Starlette for routing and static files.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ class LandingHub:
         self.config = config
 
     def mount(self, fastapi_app, route: str = "/"):
-        """Register static files, WS router, debug API, and NiceGUI page."""
+        """Register static files, WS router, debug API, data API, and page route."""
         from starlette.staticfiles import StaticFiles
         from llming_hub.ws import build_hub_router
         from llming_hub.page import create_hub_page
@@ -58,7 +61,13 @@ class LandingHub:
                 )
             )
 
-        # 5. NiceGUI page
-        create_hub_page(self.config, route=route)
+        # 5. Hub page route (pure HTML — no NiceGUI)
+        # Must use routes.insert(0, ...) to beat NiceGUI's ASGI middleware
+        # which intercepts all routes before FastAPI's router processes them.
+        # Same pattern as llming-lodge's chat page registration.
+        from starlette.routing import Route
+        fastapi_app.routes.insert(0, Route(
+            route, create_hub_page(self.config, route=route), methods=["GET"],
+        ))
 
-        logger.info(f"[LLMING_HUB] Mounted at route={route}, static={self.config.static_prefix}")
+        logger.info("[LLMING_HUB] Mounted at route=%s, static=%s", route, self.config.static_prefix)

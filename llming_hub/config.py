@@ -46,7 +46,7 @@ class SessionInfo:
     banner_html: str = ""
     version: str = ""
     copyright: str = ""
-    is_admin: bool = False
+    permissions: list[str] = field(default_factory=list)  # PERM_* constants
     admin_url: str = ""
     settings_url: str = ""
     dev_overrides: bool = False
@@ -79,8 +79,17 @@ class HubConfig:
     directory: Any = None  # DirectoryAdapter
 
     # Session setup callback — consuming app provides auth + user info
-    # Signature: async () -> SessionInfo | None
+    # Signature: async (request) -> SessionInfo | None
     session_setup: Optional[Callable] = None
+
+    # OAuth start handler — called when session_setup returns None
+    # Signature: async (request) -> Response (redirect to OAuth provider)
+    # If not set, stale cookies are cleared and the page redirects to itself.
+    oauth_start_handler: Optional[Callable] = None
+
+    # OAuth callback handler — called when /?code=... arrives from the provider
+    # Signature: async (request) -> Response (exchange code, set cookies, redirect)
+    oauth_callback_handler: Optional[Callable] = None
 
     # Debug API security dependency (FastAPI Depends)
     debug_auth_dependency: Optional[Callable] = None
