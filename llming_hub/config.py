@@ -55,6 +55,8 @@ class SessionInfo:
     extra_css_urls: list[str] = field(default_factory=list)
     config_extra: dict[str, Any] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
+    response_cookies: list[dict[str, Any]] = field(default_factory=list)
+    """Cookies to set on the hub page response. Each dict is passed as kwargs to response.set_cookie()."""
 
 
 @dataclass
@@ -90,6 +92,14 @@ class HubConfig:
     # OAuth callback handler — called when /?code=... arrives from the provider
     # Signature: async (request) -> Response (exchange code, set cookies, redirect)
     oauth_callback_handler: Optional[Callable] = None
+
+    # AuthManager instance — used by the hub's fallback path to know which
+    # cookie names to clear on auth failure. If not set, the hub falls back
+    # to llming-com's default-prefix cookie names (``llming_auth`` /
+    # ``llming_session``), which only match a host that uses
+    # ``AuthManager()`` without an ``app_name``. Pass the AuthManager your
+    # app instantiated (typically ``AuthManager(app_name="<your-app>")``).
+    auth_manager: Any = None
 
     # Debug API security dependency (FastAPI Depends)
     debug_auth_dependency: Optional[Callable] = None

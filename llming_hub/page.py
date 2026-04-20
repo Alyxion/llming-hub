@@ -120,12 +120,8 @@ def create_hub_page(config: "HubConfig", route: str = "/"):
         try:
             return await _hub_route_impl(config, request)
         except Exception as e:
-            logger.exception("[HUB] hub_route crashed: %s", e)
-            import html
-            return HTMLResponse(
-                f"<html><body><h1>Error</h1><p>{html.escape(str(e))}</p></body></html>",
-                status_code=500,
-            )
+            from llming_com import error_response
+            return error_response(e, request_path=request.url.path)
 
     return hub_route
 
@@ -158,13 +154,22 @@ async def _hub_route_impl(config: "HubConfig", request: Request):
         from starlette.responses import RedirectResponse
         if config.oauth_start_handler:
             return await config.oauth_start_handler(request)
-        # Fallback: clear cookies and redirect to self — the page will
-        # show without user-specific data (no redirect loop since cookies
-        # are cleared).
+        # Fallback: clear session cookies but KEEP the identity cookie —
+        # it may still be valid, just a transient Redis/API failure.
+        # OAuth will re-set it if truly invalid. Cookie names come from the
+        # host-provided AuthManager instance so per-app naming holds; if no
+        # auth_manager was configured we fall back to the shared default.
         response = RedirectResponse("/", status_code=302)
-        response.delete_cookie("llming_identity", path="/")
-        response.delete_cookie("llming_auth", path="/")
-        response.delete_cookie("llming_session", path="/")
+        if config.auth_manager is not None:
+            auth_name = config.auth_manager.auth_cookie_name
+            session_name = config.auth_manager.session_cookie_name
+        else:
+            from llming_com import get_auth as _default_auth
+            _a = _default_auth()
+            auth_name = _a.auth_cookie_name
+            session_name = _a.session_cookie_name
+        response.delete_cookie(auth_name, path="/")
+        response.delete_cookie(session_name, path="/")
         return response
 
     user = session_info.user
@@ -248,4 +253,7 @@ async def _hub_route_impl(config: "HubConfig", request: Request):
     ]
 
     html = _build_hub_html(config_json, css_urls, js_scripts, title=config.app_title or "Hub")
-    return HTMLResponse(html)
+    response = HTMLResponse(html)
+    for cookie_kwargs in session_info.response_cookies:
+        response.set_cookie(**cookie_kwargs)
+    return response

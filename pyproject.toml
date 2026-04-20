@@ -7,7 +7,7 @@ license = "BUSL-1.1"
 packages = [{include = "llming_hub"}]
 
 [tool.poetry.dependencies]
-python = ">=3.14"
+python = ">=3.14,<4"
 fastapi = "*"
 starlette = "*"
 llming-com = {path = "../llming-com", develop = true}

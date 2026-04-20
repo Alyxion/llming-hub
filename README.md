@@ -154,10 +154,19 @@ Available adapter interfaces:
 | `accent_color` | Primary accent color (CSS) |
 | `bg_dark_url`, `bg_light_url` | Background images for dark/light themes |
 | `provider_factory` | `(widget_id, session) → BaseProvider` callback |
-| `session_setup` | `() → SessionInfo` async callback for auth + user info |
+| `session_setup` | `async (request) → SessionInfo \| None` — host's auth + user info callback |
+| `oauth_start_handler` | `async (request) → Response` — redirects to OAuth provider when `session_setup` returns `None` |
+| `oauth_callback_handler` | `async (request) → Response` — handles `?code=…` from the OAuth provider |
+| `auth_manager` | Host's `AuthManager` instance — the hub uses this only to know which cookie names to clear on auth failure (no app-name isolation → cookies may collide with sibling llming-com apps) |
 | `directory` | Optional `DirectoryAdapter` for avatar resolution |
 | `data_handlers` | Dict of plugin resource handlers (photos, thumbnails) |
 | `debug_auth_dependency` | FastAPI dependency for debug API authentication |
+
+### Auth
+
+llming-hub does not instantiate its own `AuthManager`. The host supplies all auth logic via three callbacks (`session_setup`, `oauth_start_handler`, `oauth_callback_handler`) and passes its `AuthManager` via `HubConfig.auth_manager` so the hub's failure-path cookie clearing matches the host's cookie prefix.
+
+Auth is **unified across all pages** that share a `llming_com.get_auth()` singleton: cookies set during OAuth callback on the hub are visible to any sibling page (chat, admin) the host mounts. See the llming-com [Unified auth across pages](../llming-com/README.md#unified-auth-across-pages) section for the full flow and the per-app isolation pattern (`app_name`) for multi-app deployments.
 
 ## Debug API
 
